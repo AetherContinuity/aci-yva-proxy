@@ -144,9 +144,14 @@ const VAIHEET = [
 
 function parseProject(html) {
   const lines = textify(html);
+  // Arvo on joko samalla rivillä ("Tila: Vireillä") tai seuraavalla
+  // ("Tila:" / "Vireillä") — elävä sivu käyttää jälkimmäistä.
   const field = (label) => {
-    const re = new RegExp(`^${label}:\\s*(.+)$`, 'i');
-    for (const l of lines) { const m = l.match(re); if (m) return m[1].trim(); }
+    const re = new RegExp(`^${label}:\\s*(.*)$`, 'i');
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(re);
+      if (m) return (m[1].trim() || lines[i + 1] || '').trim() || null;
+    }
     return null;
   };
   // Aikataulu: rivit otsikon "aikataulu" jälkeen, joissa on päivämäärä,
@@ -161,7 +166,10 @@ function parseProject(html) {
       if (ds.length) aikataulu.push({ text: l, vaihe, alku: ds[0], loppu: ds.length > 1 ? ds[ds.length - 1] : null });
     }
   }
-  const pub = lines.map(l => l.match(/Julkaistu\s+(\d{1,2}\.\d{1,2}\.\d{4})(?:\s*\/\s*Päivitetty\s+(\d{1,2}\.\d{1,2}\.\d{4}))?/i)).find(Boolean);
+  // "Julkaistu 19.3.2026" ja "/ Päivitetty 17.6.2026" voivat olla eri riveillä.
+  const joined = lines.map((l, i) => /^Julkaistu/i.test(l) && /^\/?\s*Päivitetty/i.test(lines[i + 1] || '')
+    ? `${l} ${lines[i + 1].replace(/^\//, '/ ')}` : l);
+  const pub = joined.map(l => l.match(/Julkaistu\s+(\d{1,2}\.\d{1,2}\.\d{4})(?:\s*\/\s*Päivitetty\s+(\d{1,2}\.\d{1,2}\.\d{4}))?/i)).find(Boolean);
   const julkaisijaI = lines.findIndex(l => /^Julkaisija$/i.test(l));
   return {
     tila: field('Tila'),
@@ -171,6 +179,8 @@ function parseProject(html) {
     julkaistu: pub ? datesIn(pub[1])[0] || null : null,
     paivitetty: pub && pub[2] ? datesIn(pub[2])[0] || null : null,
     julkaisija: julkaisijaI >= 0 ? lines[julkaisijaI + 1] || null : null,
+    // Diaarinumero (esim. LVV-U/53982/2026) julkaisutietojen yläpuolella.
+    asianumero: (lines.find(l => /^[A-ZÄÖ]{2,6}(-[A-ZÄÖ]{1,4})?\/\d+\/\d{4}$/.test(l)) || null),
     lyhytosoite: (lines.map(l => l.match(/lyhytosoite on:?\s*(\S+)/i)).find(Boolean) || [])[1] || null,
   };
 }
