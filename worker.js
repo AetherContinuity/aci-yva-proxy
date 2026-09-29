@@ -136,10 +136,14 @@ function datesIn(line) {
 
 // Vaiheet avainsanoista. Järjestys on menettelyn järjestys.
 const VAIHEET = [
-  ['ohjelma_nahtavilla',   /arviointiohjelma\S*\s+(on\s+)?nähtävillä/i],
-  ['ohjelma_lausunto',     /lausun\S*\s+(yva-)?(arviointi)?ohjelmasta|ohjelmasta\s+on\s+annettu/i],
-  ['selostus_nahtavilla',  /arviointiselostus\S*\s+(on\s+)?nähtävillä|yva-selostus\S*\s+(on\s+)?nähtävillä/i],
+  // Sanamuodot vaihtelevat: "Arviointiohjelma nähtävillä", "YVA-ohjelma on
+  // ollut nähtävillä", "Arviointiohjelma on nähtävillä". Enintään 40 merkkiä
+  // väliä, ei pisteen yli. Päätelmä ennen lausuntoa: "perusteltu päätelmä
+  // YVA-selostuksesta" ei saa osua selostuksen nähtävilläoloon.
   ['perusteltu_paatelma',  /perustel\S*\s+päätelm/i],
+  ['ohjelma_lausunto',     /lausun\S*[^.]{0,60}?(yva-|arviointi)?ohjelmasta|ohjelmasta\s+on\s+annettu/i],
+  ['ohjelma_nahtavilla',   /(arviointi|yva-)ohjelm\S*[^.]{0,40}?nähtävillä/i],
+  ['selostus_nahtavilla',  /(arviointi|yva-)selostu\S*[^.]{0,40}?nähtävillä/i],
 ];
 
 function parseProject(html) {
