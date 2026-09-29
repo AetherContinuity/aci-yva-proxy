@@ -93,6 +93,110 @@ function parseIndex(html) {
   return out;
 }
 
+
+// ── Hankesivun jäsennys (lisätty 2026-09-29) ─────────────────────
+// Aiempi jäsennin etsi vain href="...pdf" -linkkejä ja palautti 0
+// asiakirjaa myös hankkeille, joilla niitä on kymmeniä (Pyhäjoen
+// datakeskus: 19). Drupal ei päätä asiakirjalinkkejä tiedostopäätteeseen.
+// Linkkiteksti sen sijaan kertoo muodon: "Arviointiohjelma (pdf, 15.74 Mt)".
+//
+// Päivämäärät ja tila luetaan TEKSTISTÄ, ei HTML-rakenteesta: sivupohja
+// voi muuttua, mutta sivun näkyvä teksti ("Tila: Vireillä",
+// "Arviointiselostus nähtävillä 19.3.-8.5.2026") on se mitä
+// yhteysviranomainen julkaisee. Jäsennin palauttaa aina myös raakarivit,
+// jotta tulkinnan voi tarkistaa.
+
+function textify(html) {
+  const main = (html.match(/<main[\s\S]*?<\/main>/i) || [html])[0];
+  return main
+    .replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|li|h[1-6]|div|dt|dd|tr|section|article|summary)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'").replace(/&ndash;/g, '–').replace(/&mdash;/g, '—')
+    .split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+}
+
+// "28.8.2025" -> "2025-08-28". Alkupäivästä voi puuttua vuosi ("28.8.-26.9.2025").
+function isoDate(d, m, y) {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+const DATE = /(\d{1,2})\.(\d{1,2})\.(\d{4})?/g;
+function datesIn(line) {
+  const raw = [...line.matchAll(DATE)].map(m => ({ d: +m[1], m: +m[2], y: m[3] ? +m[3] : null }));
+  // vuoden täydennys seuraavasta päivästä; jos kuukausi on suurempi, edellinen vuosi
+  for (let i = raw.length - 1; i >= 0; i--) {
+    if (raw[i].y == null && i + 1 < raw.length && raw[i + 1].y != null)
+      raw[i].y = raw[i].m > raw[i + 1].m ? raw[i + 1].y - 1 : raw[i + 1].y;
+  }
+  return raw.filter(x => x.y && x.m >= 1 && x.m <= 12 && x.d >= 1 && x.d <= 31)
+            .map(x => isoDate(x.d, x.m, x.y));
+}
+
+// Vaiheet avainsanoista. Järjestys on menettelyn järjestys.
+const VAIHEET = [
+  ['ohjelma_nahtavilla',   /arviointiohjelma\S*\s+(on\s+)?nähtävillä/i],
+  ['ohjelma_lausunto',     /lausun\S*\s+(yva-)?(arviointi)?ohjelmasta|ohjelmasta\s+on\s+annettu/i],
+  ['selostus_nahtavilla',  /arviointiselostus\S*\s+(on\s+)?nähtävillä|yva-selostus\S*\s+(on\s+)?nähtävillä/i],
+  ['perusteltu_paatelma',  /perustel\S*\s+päätelm/i],
+];
+
+function parseProject(html) {
+  const lines = textify(html);
+  const field = (label) => {
+    const re = new RegExp(`^${label}:\\s*(.+)$`, 'i');
+    for (const l of lines) { const m = l.match(re); if (m) return m[1].trim(); }
+    return null;
+  };
+  // Aikataulu: rivit otsikon "aikataulu" jälkeen, joissa on päivämäärä,
+  // kunnes tulee rivi ilman päivämäärää ja ilman vaiheavainsanaa.
+  const start = lines.findIndex(l => /menettelyn aikataulu/i.test(l));
+  const aikataulu = [];
+  if (start >= 0) {
+    for (const l of lines.slice(start + 1, start + 25)) {
+      const ds = datesIn(l);
+      const vaihe = (VAIHEET.find(([, re]) => re.test(l)) || [null])[0];
+      if (!ds.length && !vaihe) { if (aikataulu.length) break; else continue; }
+      if (ds.length) aikataulu.push({ text: l, vaihe, alku: ds[0], loppu: ds.length > 1 ? ds[ds.length - 1] : null });
+    }
+  }
+  const pub = lines.map(l => l.match(/Julkaistu\s+(\d{1,2}\.\d{1,2}\.\d{4})(?:\s*\/\s*Päivitetty\s+(\d{1,2}\.\d{1,2}\.\d{4}))?/i)).find(Boolean);
+  const julkaisijaI = lines.findIndex(l => /^Julkaisija$/i.test(l));
+  return {
+    tila: field('Tila'),
+    alueet: field('Alueet'),
+    aihealue: field('Aihealue'),
+    aikataulu,
+    julkaistu: pub ? datesIn(pub[1])[0] || null : null,
+    paivitetty: pub && pub[2] ? datesIn(pub[2])[0] || null : null,
+    julkaisija: julkaisijaI >= 0 ? lines[julkaisijaI + 1] || null : null,
+    lyhytosoite: (lines.map(l => l.match(/lyhytosoite on:?\s*(\S+)/i)).find(Boolean) || [])[1] || null,
+  };
+}
+
+// Asiakirjat: linkki jonka teksti kertoo muodon "(pdf, 15.74 Mt)" TAI
+// jonka osoite päättyy tiedostopäätteeseen.
+function parseDocuments(html, base) {
+  const docs = [];
+  const A = /<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let d;
+  while ((d = A.exec(html)) !== null) {
+    const text = d[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const fmt = text.match(/\((pdf|docx?|xlsx?|zip)\s*,\s*([\d.,]+\s*[kMG]?t)\)/i);
+    const ext = d[1].match(/\.(pdf|docx?|xlsx?|zip)(\?|$)/i);
+    if (!fmt && !ext) continue;
+    docs.push({
+      url: d[1].startsWith('http') ? d[1] : base + d[1],
+      text: text.replace(/\s*\((pdf|docx?|xlsx?|zip)\s*,[^)]*\)\s*$/i, ''),
+      format: (fmt ? fmt[1] : ext[1]).toLowerCase(),
+      size: fmt ? fmt[2] : null,
+      dates: datesIn(text),
+    });
+  }
+  return docs;
+}
+
 export default {
   async fetch(req) {
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -167,23 +271,23 @@ export default {
           throw new Error('?project: polku ei ole YVA-hankesivu');
         const { html, url } = await fetchHtml(path);
         const title = (html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1];
-        // Asiakirjalinkit: PDF ja muut liitteet.
-        const docs = [];
-        const D = /<a\s+href="([^"]+\.(?:pdf|docx?|xlsx?))"[^>]*>([\s\S]*?)<\/a>/gi;
-        let d;
-        while ((d = D.exec(html)) !== null) {
-          docs.push({
-            url: d[1].startsWith('http') ? d[1] : BASE + d[1],
-            text: d[2].replace(/<[^>]+>/g, '').trim(),
-          });
-        }
+        // ?raw=1: näkyvä teksti riveinä jäsentimen tarkistamiseen. Ei
+        // HTML:ää eikä avointa välitystä — vain YVA-hankesivujen teksti.
+        if (p.get('raw') === '1')
+          return ok({ route: 'project', url, raw_lines: textify(html).slice(0, 400) });
+        const docs = parseDocuments(html, BASE);
+        const meta = parseProject(html);
         return ok({
           route: 'project', url,
           title: title ? title.replace(/<[^>]+>/g, '').trim() : null,
+          ...meta,
+          _aikataulu_note: 'Luettu sivun tekstistä rivi kerrallaan. vaihe = avainsanatunnistus; '
+                         + 'null = rivillä on päivämäärä mutta vaihetta ei tunnistettu (tarkista text). '
+                         + 'Aikataulu täydentyy menettelyn edetessä.',
           n_documents: docs.length,
-          _documents_note: 'Arviointiohjelma ja -selostus ovat hankesivulla. '
-                         + 'Tyhjä lista voi tarkoittaa ettei niitä ole vielä '
-                         + 'julkaistu — se on eri asia kuin jäsentimen vika.',
+          _documents_note: 'Linkit joiden teksti kertoo muodon "(pdf, 15.74 Mt)" tai osoite päättyy '
+                         + 'tiedostopäätteeseen. Tyhjä lista voi tarkoittaa ettei asiakirjoja ole '
+                         + 'vielä julkaistu.',
           documents: docs,
         });
       }
@@ -195,7 +299,8 @@ export default {
         routes: {
           index:   "?index=A-N | O-Ö | all",
           filter:  "?filter=datakeskus",
-          project: "?project=<slug|polku|url>",
+          project: "?project=<slug|polku|url>   — tila, aihealue, aikataulu, asiakirjat",
+          raw:     "?project=<slug>&raw=1   — sivun näkyvä teksti riveinä (jäsentimen tarkistus)",
         },
         traps: [
           'HTML-jäsennin, ei rajapinta. Drupal 11 /jsonapi kokeiltiin '
