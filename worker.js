@@ -134,17 +134,50 @@ function datesIn(line) {
             .map(x => isoDate(x.d, x.m, x.y));
 }
 
-// Vaiheet avainsanoista. Järjestys on menettelyn järjestys.
+// Vaiheet avainsanoista. Ensimmäinen osuma voittaa, joten järjestys on
+// tarkimmasta yleisimpään (ei menettelyn järjestys).
+//
+// 2026-10-01 (OGAS3:n 1. täysi ajo, 32 tunnistamatonta riviä):
+//  - "kuultavana" ja "kuulutus" ovat "nähtävillä"-synonyymejä
+//    ("YVA-selostus oli kuultavana 3.8.-2.10.2023")
+//  - täydennyspyyntö: "Puutteellisen YVA-selostuksen täydennyspyyntö",
+//    "ilmoitus ... täydentämistarpeesta" — viivästyssignaali
+//  - selostus_lausunto: yhteysviranomaisen lausunto selostuksesta = vanhan
+//    YVA-lain (ennen 16.5.2017) loppuvaihe. EI perusteltu_paatelma: eri
+//    oikeudellinen instrumentti, vaikka sama paikka menettelyssä.
+//  - yleisötilaisuus tunnistetaan, jotta se ei näy tunnistamattomana; se
+//    ei ole menettelyn vaihe. Vain jos rivillä ei ole nähtävilläoloa —
+//    "selostus nähtävillä ..., yleisötilaisuus 5.5." on selostusrivi.
+//  - pelkkä "Yhteysviranomaisen lausunto 20.10.2023" ratkaistaan
+//    jälkikäteen kontekstista (resolveLausunnot), koska teksti ei kerro,
+//    koskeeko se ohjelmaa vai selostusta.
+const NAHTAVILLA = '(?:nähtävillä|kuultavana|kuulutu)';
 const VAIHEET = [
-  // Sanamuodot vaihtelevat: "Arviointiohjelma nähtävillä", "YVA-ohjelma on
-  // ollut nähtävillä", "Arviointiohjelma on nähtävillä". Enintään 40 merkkiä
-  // väliä, ei pisteen yli. Päätelmä ennen lausuntoa: "perusteltu päätelmä
-  // YVA-selostuksesta" ei saa osua selostuksen nähtävilläoloon.
   ['perusteltu_paatelma',  /perustel\S*\s+päätelm/i],
+  ['taydennyspyynto',      /täydennyspyyn|täydentämistarpee/i],
   ['ohjelma_lausunto',     /lausun\S*[^.]{0,60}?(yva-|arviointi)?ohjelmasta|ohjelmasta\s+on\s+annettu/i],
-  ['ohjelma_nahtavilla',   /(arviointi|yva-)ohjelm\S*[^.]{0,40}?nähtävillä/i],
-  ['selostus_nahtavilla',  /(arviointi|yva-)selostu\S*[^.]{0,40}?nähtävillä/i],
+  ['selostus_lausunto',    /lausun\S*[^.]{0,60}?(yva-|arviointi)selostuksesta/i],
+  ['yleisotilaisuus',      new RegExp(`^(?!.*${NAHTAVILLA}).*yleisötilaisuu`, 'i')],
+  ['ohjelma_nahtavilla',   new RegExp(`(arviointi|yva-)ohjelm\\S*[^.]{0,40}?${NAHTAVILLA}`, 'i')],
+  ['selostus_nahtavilla',  new RegExp(`(arviointi|yva-)selostu\\S*[^.]{0,40}?${NAHTAVILLA}`, 'i')],
 ];
+const PELKKA_LAUSUNTO = /yhteysviranomai\S*\s+lausun/i;
+
+// Kontekstiton lausunto: viimeisin sitä edeltävä (tai samana päivänä alkanut)
+// nähtävilläolo ratkaisee. Ei edeltävää -> jää tunnistamattomaksi.
+function resolveLausunnot(aikataulu) {
+  for (const a of aikataulu) {
+    if (a.vaihe || !PELKKA_LAUSUNTO.test(a.text)) continue;
+    const prev = aikataulu
+      .filter(b => (b.vaihe === 'ohjelma_nahtavilla' || b.vaihe === 'selostus_nahtavilla') && b.alku <= a.alku)
+      .sort((x, y) => x.alku.localeCompare(y.alku)).at(-1);
+    if (prev) {
+      a.vaihe = prev.vaihe === 'ohjelma_nahtavilla' ? 'ohjelma_lausunto' : 'selostus_lausunto';
+      a.vaihe_paatelty = 'konteksti: edeltävä ' + prev.vaihe;
+    }
+  }
+  return aikataulu;
+}
 
 function parseProject(html) {
   const lines = textify(html);
@@ -169,6 +202,7 @@ function parseProject(html) {
       if (!ds.length && !vaihe) { if (aikataulu.length) break; else continue; }
       if (ds.length) aikataulu.push({ text: l, vaihe, alku: ds[0], loppu: ds.length > 1 ? ds[ds.length - 1] : null });
     }
+    resolveLausunnot(aikataulu);
   }
   // "Julkaistu 19.3.2026" ja "/ Päivitetty 17.6.2026" voivat olla eri riveillä.
   const joined = lines.map((l, i) => /^Julkaistu/i.test(l) && /^\/?\s*Päivitetty/i.test(lines[i + 1] || '')
